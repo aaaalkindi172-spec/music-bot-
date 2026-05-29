@@ -1,6 +1,4 @@
-pyrogram==2.0.106
-tgcrypto==1.2.5
-pytgcalls==3.0.0.dev24
+pyTelegramBotAPI
+Flask
+gunicorn
 yt-dlp
-youtube-search-python==1.6.6
-flask==3.0.3
