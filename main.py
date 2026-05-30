@@ -1,155 +1,112 @@
-import os
-import telebot
+import discord
+from discord.ext import commands
 import yt_dlp
-from flask import Flask
-from threading import Thread
-from collections import deque
+import asyncio
+import os
 
-# ================= WEB SERVER =================
-app = Flask(__name__)
+TOKEN = os.getenv("DISCORD_TOKEN", "PUT_YOUR_TOKEN_HERE")
 
-@app.route('/')
-def home():
-    return "PRO ULTRA Music Bot Running"
+intents = discord.Intents.default()
+intents.message_content = True
+intents.voice_states = True
 
-Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))).start()
-
-# ================= BOT =================
-bot = telebot.TeleBot(os.environ.get("BOT_TOKEN"))
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 queues = {}
 
-def get_queue(chat_id):
-    if chat_id not in queues:
-        queues[chat_id] = deque()
-    return queues[chat_id]
+ytdl_opts = {
+    "format": "bestaudio/best",
+    "quiet": True,
+    "default_search": "ytsearch",
+    "nocheckcertificate": True,
+}
 
-# ================= YOUTUBE SEARCH =================
-def search_youtube(query):
-    ydl_opts = {
-        'format': 'bestaudio',
-        'quiet': True,
-        'default_search': 'ytsearch1'
+ffmpeg_opts = {
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "options": "-vn"
+}
+
+ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+
+
+def search(query):
+    info = ytdl.extract_info(query, download=False)
+    if "entries" in info:
+        info = info["entries"][0]
+    return {
+        "url": info["url"],
+        "title": info.get("title", "Unknown")
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(query, download=False)
-        return info['entries'][0]['webpage_url']
 
-# ================= DOWNLOAD =================
-def download_audio(url):
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': 'song.%(ext)s',
-        'quiet': True,
-        'nocheckcertificate': True,
-        'geo_bypass': True
-    }
+async def play_next(ctx):
+    guild_id = ctx.guild.id
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-
-    for f in os.listdir():
-        if f.startswith("song"):
-            return f
-
-# ================= INLINE BUTTONS =================
-def controls():
-    markup = telebot.types.InlineKeyboardMarkup()
-
-    markup.row(
-        telebot.types.InlineKeyboardButton("⏭ Skip", callback_data="skip"),
-        telebot.types.InlineKeyboardButton("⏹ Stop", callback_data="stop")
-    )
-
-    markup.row(
-        telebot.types.InlineKeyboardButton("🔁 Replay", callback_data="replay")
-    )
-
-    return markup
-
-# ================= PLAY SYSTEM =================
-def play(chat_id):
-    q = get_queue(chat_id)
-
-    if not q:
+    if guild_id not in queues or len(queues[guild_id]) == 0:
         return
 
-    url = q[0]
+    song = queues[guild_id].pop(0)
 
-    file = download_audio(url)
+    vc = ctx.voice_client
 
-    with open(file, 'rb') as audio:
-        bot.send_audio(
-            chat_id,
-            audio,
-            caption="🎧 Now Playing",
-            reply_markup=controls()
-        )
+    source = discord.FFmpegPCMAudio(song["url"], **ffmpeg_opts)
 
-    os.remove(file)
+    vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop))
 
-# ================= START =================
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.reply_to(
-        message,
-        "🎵 PRO ULTRA BOT\n\n"
-        "✔ أرسل اسم أو رابط\n"
-        "✔ يدعم Queue\n"
-        "✔ أزرار تحكم"
-    )
+    await ctx.send(f"🎶 Now playing: **{song['title']}**")
 
-# ================= MAIN =================
-@bot.message_handler(func=lambda m: True)
-def handle(message):
 
-    text = message.text.strip()
-    chat_id = message.chat.id
+@bot.command()
+async def join(ctx):
+    if ctx.author.voice:
+        channel = ctx.author.voice.channel
+        await channel.connect()
+        await ctx.send("✅ Joined voice channel")
+    else:
+        await ctx.send("❌ You must be in a voice channel")
 
-    msg = bot.reply_to(message, "⏳ Processing...")
 
-    try:
+@bot.command()
+async def play(ctx, *, query):
+    if not ctx.voice_client:
+        await ctx.invoke(join)
 
-        if text.startswith("http"):
-            url = text
-        else:
-            url = search_youtube(text)
+    song = search(query)
 
-        q = get_queue(chat_id)
-        q.append(url)
+    guild_id = ctx.guild.id
+    queues.setdefault(guild_id, []).append(song)
 
-        bot.edit_message_text("➕ Added to queue", chat_id, msg.message_id)
+    await ctx.send(f"➕ Added: **{song['title']}**")
 
-        if len(q) == 1:
-            play(chat_id)
+    if not ctx.voice_client.is_playing():
+        await play_next(ctx)
 
-    except:
-        bot.edit_message_text("❌ Error", chat_id, msg.message_id)
 
-# ================= CALLBACKS =================
-@bot.callback_query_handler(func=lambda call: True)
-def callback(call):
+@bot.command()
+async def skip(ctx):
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        ctx.voice_client.stop()
+        await ctx.send("⏭ Skipped")
 
-    chat_id = call.message.chat.id
-    q = get_queue(chat_id)
 
-    if call.data == "skip":
-        if q:
-            q.popleft()
-            play(chat_id)
+@bot.command()
+async def stop(ctx):
+    if ctx.voice_client:
+        await ctx.voice_client.disconnect()
+        await ctx.send("⛔ Stopped")
 
-        bot.answer_callback_query(call.id, "⏭ Skipped")
 
-    elif call.data == "stop":
-        queues[chat_id] = deque()
-        bot.answer_callback_query(call.id, "⏹ Stopped")
+@bot.command()
+async def queue(ctx):
+    guild_id = ctx.guild.id
+    q = queues.get(guild_id, [])
 
-    elif call.data == "replay":
-        if q:
-            play(chat_id)
+    if not q:
+        await ctx.send("📭 Queue is empty")
+        return
 
-        bot.answer_callback_query(call.id, "🔁 Replaying")
+    msg = "\n".join([f"{i+1}. {s['title']}" for i, s in enumerate(q)])
+    await ctx.send(f"🎧 Queue:\n{msg}")
 
-# ================= RUN =================
-bot.infinity_polling()
+
+bot.run(TOKEN)
