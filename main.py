@@ -3,59 +3,129 @@ import telebot
 import yt_dlp
 from flask import Flask
 from threading import Thread
+from collections import deque
 
-# ===== Flask Keep Alive =====
+# ================= WEB SERVER =================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running 24/7"
+    return "PRO MAX Music Bot is running"
 
-def run():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))).start()
 
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
+# ================= BOT =================
+bot = telebot.TeleBot(os.environ.get("BOT_TOKEN"))
 
-# ===== Telegram Bot =====
-TOKEN = os.environ.get("BOT_TOKEN")
-bot = telebot.TeleBot(TOKEN)
+# Queue لكل مجموعة
+queues = {}
 
-# Start command
+def get_queue(chat_id):
+    if chat_id not in queues:
+        queues[chat_id] = deque()
+    return queues[chat_id]
+
+# ================= YT SEARCH =================
+def search_youtube(query):
+    ydl_opts = {
+        'format': 'bestaudio',
+        'quiet': True,
+        'default_search': 'ytsearch1'
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(query, download=False)
+        return info['entries'][0]['webpage_url']
+
+# ================= DOWNLOAD =================
+def download_audio(url):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': 'song.%(ext)s',
+        'quiet': True,
+        'nocheckcertificate': True,
+        'geo_bypass': True,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+    for f in os.listdir():
+        if f.startswith("song"):
+            return f
+
+# ================= PLAY FUNCTION =================
+def play_next(chat_id):
+    q = get_queue(chat_id)
+
+    if not q:
+        return
+
+    url = q.popleft()
+    file = download_audio(url)
+
+    with open(file, 'rb') as audio:
+        bot.send_audio(chat_id, audio, caption="🎧 Now Playing")
+
+    os.remove(file)
+
+# ================= COMMANDS =================
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "🎵 أهلاً بك!\nأرسل رابط يوتيوب وسأقوم بتحميله لك كصوت.")
+    bot.reply_to(
+        message,
+        "🎵 PRO MAX MUSIC BOT\n\n"
+        "📌 أرسل:\n"
+        "- رابط يوتيوب\n"
+        "- أو اسم أغنية\n\n"
+        "⚡ يدعم Queue و التحكم"
+    )
 
-# Handle links
+# ================= MAIN HANDLER =================
 @bot.message_handler(func=lambda m: True)
-def download_audio(message):
-    url = message.text
+def handle(message):
 
-    status = bot.reply_to(message, "⏳ جاري التحميل...")
+    text = message.text.strip()
+    chat_id = message.chat.id
+
+    msg = bot.reply_to(message, "⏳ جاري المعالجة...")
 
     try:
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': 'song.%(ext)s',
-            'quiet': True
-        }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+        # إذا بحث أو رابط
+        if text.startswith("http"):
+            url = text
+        else:
+            url = search_youtube(text)
 
-        with open(filename, 'rb') as audio:
-            bot.send_audio(message.chat.id, audio)
+        q = get_queue(chat_id)
+        q.append(url)
 
-        os.remove(filename)
+        bot.edit_message_text("➕ تمت الإضافة إلى قائمة التشغيل", chat_id, msg.message_id)
 
-        bot.delete_message(message.chat.id, status.message_id)
+        # إذا أول عنصر → تشغيل مباشر
+        if len(q) == 1:
+            play_next(chat_id)
 
     except Exception:
-        bot.edit_message_text("❌ حدث خطأ أثناء التحميل", message.chat.id, status.message_id)
+        bot.edit_message_text("❌ خطأ في المعالجة", chat_id, msg.message_id)
 
+# ================= SKIP =================
+@bot.message_handler(commands=['skip'])
+def skip(message):
+    chat_id = message.chat.id
+    q = get_queue(chat_id)
 
-if __name__ == "__main__":
-    keep_alive()
-    bot.infinity_polling()
+    if q:
+        play_next(chat_id)
+    else:
+        bot.reply_to(message, "❌ لا يوجد شيء للتخطي")
+
+# ================= CLEAR =================
+@bot.message_handler(commands=['stop'])
+def stop(message):
+    chat_id = message.chat.id
+    queues[chat_id] = deque()
+    bot.reply_to(message, "⏹ تم إيقاف القائمة")
+
+# ================= RUN =================
+bot.infinity_polling()
