@@ -1,4 +1,3 @@
-pyTelegramBotAPI
-flask
-yt-dlp
-gunicorn
+discord.py==2.4.0
+yt-dlp==2026.3.17
+PyNaCl
