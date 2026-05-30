@@ -1,4 +1,4 @@
-pyrogram
-tgcrypto
-Flask
+pyTelegramBotAPI
+flask
+yt-dlp
 gunicorn
